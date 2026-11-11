@@ -1,0 +1,252 @@
+import marimo
+
+__generated_with = "0.25.2"
+app = marimo.App(width="medium", app_title="06 – Gold")
+
+
+@app.cell(hide_code=True)
+def _():
+    import marimo as mo
+    return (mo,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # 06 – Gold: airports and the views the map reads
+
+    Silver already knows *where* an aircraft is and *who* it is – the airline name and the aircraft category were
+    joined in 05. Gold doesn't map codes any more; it **answers concrete questions**: where is every aircraft right
+    now, who is landing where?
+
+    For the second question we need one more reference table: **airports** from
+    [OurAirports](https://ourairports.com/data/) (public domain, see "Terms of use" there) – name, codes, coordinates,
+    elevation. It isn't joined into every position: which airport an aircraft is near is a question, not a lookup.
+
+    The gold tables are SQL **views**: they are always up to date with silver, nothing to
+    refresh – DuckDB computes them when you ask.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    import sys
+
+    import duckdb
+    import pandas as pd
+
+    sys.path.insert(0, str(mo.notebook_dir().parent))
+    import flightlab as fl
+
+    def check(ok, good, bad):
+        return mo.callout(mo.md(("✅ " + good) if ok else ("❌ " + bad)), kind="success" if ok else "danger")
+
+    con = fl.practice(6)                            # practice_06.duckdb – continues from the step before
+    fl.init_db(con)
+    fl.ensure_sample_data(con)               # skipped 02-04? then one live call (or 2 hours from your archive, if .env has R2 settings)
+    fl.build_silver(con)                     # silver.flights incl. airline names (the finished version of 05)
+    _n = con.execute("SELECT COUNT(*), COUNT(DISTINCT icao24) FROM silver.flights").fetchone()
+    mo.md(f"silver.flights: **{_n[0]:,} positions** of {_n[1]:,} aircraft")
+    return check, con, fl, pd
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## TODO 6.1 – Airports
+
+    Read `airports.csv` (the path is in `airports_csv`, downloaded once into `cache/`) with pandas, keep only
+    `large_airport` and `medium_airport` and store the table **`silver.airports`** with these columns:
+
+    `airport_icao` (from `ident`), `airport_iata` (`iata_code`), `airport_name` (`name`), `airport_type` (`type`),
+    `city` (`municipality`), `country` (`iso_country`), `latitude` (`latitude_deg`), `longitude` (`longitude_deg`),
+    `elevation_ft`.
+
+    /// details | Hint
+    `pd.read_csv(path, keep_default_na=False, na_values=[""])` – without `keep_default_na=False` pandas turns the
+    country code **NA** (Namibia) into a missing value! Then `con.execute("CREATE OR REPLACE TABLE silver.airports AS
+    SELECT * FROM airports")` – DuckDB finds the DataFrame `airports` by its name.
+    ///
+    """)
+    return
+
+
+@app.cell
+def _(con, fl, pd):
+    airports_csv = fl.cached(fl.AIRPORTS_URL, "airports.csv")
+
+    # >>> TODO 6.1: silver.airports (large + medium airports, columns as listed above)
+    # ?? airports = pd.DataFrame()
+    _ap = pd.read_csv(airports_csv, keep_default_na=False, na_values=[""])
+    _ap = _ap[_ap["type"].isin(["large_airport", "medium_airport"])]
+    airports = pd.DataFrame({
+        "airport_icao": _ap["ident"], "airport_iata": _ap["iata_code"], "airport_name": _ap["name"],
+        "airport_type": _ap["type"], "city": _ap["municipality"], "country": _ap["iso_country"],
+        "latitude": _ap["latitude_deg"], "longitude": _ap["longitude_deg"], "elevation_ft": _ap["elevation_ft"]})
+    con.execute("CREATE OR REPLACE TABLE silver.airports AS SELECT * FROM airports")
+    # <<< TODO 6.1
+    return (airports,)
+
+
+@app.cell(hide_code=True)
+def _(airports, check, con):
+    try:
+        _zrh = con.execute("SELECT airport_iata, airport_name FROM silver.airports WHERE airport_icao = 'LSZH'").fetchone()
+        _na = con.execute("SELECT COUNT(*) FROM silver.airports WHERE country = 'NA'").fetchone()[0]
+    except Exception:
+        _zrh, _na = None, 0
+    check(_zrh is not None and _zrh[0] == "ZRH" and _na > 0 and len(airports) > 3000,
+          f"{len(airports):,} airports, LSZH = {_zrh and _zrh[1]}, Namibia's airports kept ({_na})",
+          "silver.airports should have > 3,000 large/medium airports incl. LSZH (ZRH) – and Namibia (country 'NA').")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## TODO 6.2 – Where is every aircraft right now?
+
+    Create the view **`gold.current_positions`**: the **latest** row of `silver.flights` per aircraft, but only
+    aircraft seen in the last **2 minutes** before the newest snapshot (otherwise aircraft that landed an hour ago
+    would stay on the map forever). The airline name is already in silver – show `'unknown / private'` when it is
+    missing.
+
+    /// details | Hint
+    ```sql
+    CREATE OR REPLACE VIEW gold.current_positions AS
+    WITH latest AS (SELECT MAX(snapshot_time) AS max_time FROM silver.flights)
+    SELECT f.* REPLACE (COALESCE(f.airline_name, 'unknown / private') AS airline_name)
+    FROM silver.flights f CROSS JOIN latest l
+    WHERE f.snapshot_time >= l.max_time - INTERVAL 2 MINUTE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY f.icao24 ORDER BY f.snapshot_time DESC) = 1
+    ```
+    `QUALIFY` filters on a window function – like `HAVING` for `GROUP BY`. `* REPLACE (...)` keeps all columns but
+    swaps one expression.
+    ///
+    """)
+    return
+
+
+@app.cell
+def _(con):
+    # >>> TODO 6.2: view gold.current_positions (latest row per aircraft of the last 2 minutes)
+    # ?? con.execute("CREATE OR REPLACE VIEW gold.current_positions AS SELECT * FROM silver.flights")   # improve me
+    con.execute("""
+        CREATE OR REPLACE VIEW gold.current_positions AS
+        WITH latest AS (SELECT MAX(snapshot_time) AS max_time FROM silver.flights)
+        SELECT f.* REPLACE (COALESCE(f.airline_name, 'unknown / private') AS airline_name)
+        FROM silver.flights f CROSS JOIN latest l
+        WHERE f.snapshot_time >= l.max_time - INTERVAL 2 MINUTE
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY f.icao24 ORDER BY f.snapshot_time DESC) = 1""")
+    # <<< TODO 6.2
+    return
+
+
+@app.cell(hide_code=True)
+def _(check, con):
+    try:
+        _n, _ids, _oldest = con.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT icao24), MIN(snapshot_time) FROM gold.current_positions").fetchone()
+        _newest = con.execute("SELECT MAX(snapshot_time) FROM silver.flights").fetchone()[0]
+        _ok = _n == _ids and _n > 0 and (_newest - _oldest).total_seconds() <= 120
+    except Exception as _e:
+        _n, _ok = 0, False
+    check(_ok, f"{_n} aircraft right now, one row each, none older than 2 minutes",
+          "gold.current_positions should have exactly one row per aircraft, all from the last 2 minutes.")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## TODO 6.3 – Who is landing or taking off?
+
+    View **`gold.airport_approaches`**: aircraft of `gold.current_positions` that are in the air, **below 3,000 m**
+    and **within 40 km** of an airport – with that airport, the distance and `movement`
+    (`arriving` if descending, `departing` if climbing, else `nearby`).
+
+    Which airport? The obvious answer – the nearest – sends many Zurich arrivals to **Dübendorf Air Base**, 10 km
+    southeast of the airport, and Geneva arrivals to Annemasse Airfield. So: if a **large** airport is within the 40 km,
+    it wins; only otherwise the nearest one (`airport_type` in `silver.airports`). Still a heuristic, but a better one.
+
+    The distance on a sphere is the **haversine** formula (given below). The `BETWEEN` pre-filter keeps the join
+    small: without it, DuckDB would compute the distance from every aircraft to every one of the more than 5,000
+    airports in `silver.airports`.
+    """)
+    return
+
+
+@app.cell
+def _(con):
+    HAVERSINE_KM = """2 * 6371 * ASIN(SQRT(POWER(SIN(RADIANS(ap.latitude - p.latitude) / 2), 2)
+        + COS(RADIANS(p.latitude)) * COS(RADIANS(ap.latitude)) * POWER(SIN(RADIANS(ap.longitude - p.longitude) / 2), 2)))"""
+
+    # >>> TODO 6.3: view gold.airport_approaches (below 3000 m, within 40 km, large airport first, movement)
+    # ?? con.execute(f"CREATE OR REPLACE VIEW gold.airport_approaches AS SELECT 1 AS todo")   # replace me
+    con.execute(f"""
+        CREATE OR REPLACE VIEW gold.airport_approaches AS
+        WITH candidates AS (
+            SELECT p.icao24, p.callsign, p.airline_name, p.altitude_ft, p.speed_kmh, p.flight_phase,
+                   p.latitude, p.longitude, ap.airport_icao, ap.airport_iata, ap.airport_name, ap.airport_type,
+                   {HAVERSINE_KM} AS distance_km
+            FROM gold.current_positions p
+            JOIN silver.airports ap
+              ON ap.latitude BETWEEN p.latitude - 0.5 AND p.latitude + 0.5
+             AND ap.longitude BETWEEN p.longitude - 0.8 AND p.longitude + 0.8
+            WHERE NOT p.on_ground AND p.altitude_m < 3000)
+        SELECT *, CASE WHEN flight_phase = 'descending' THEN 'arriving'
+                       WHEN flight_phase = 'climbing' THEN 'departing' ELSE 'nearby' END AS movement
+        FROM candidates WHERE distance_km <= 40
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY icao24 ORDER BY airport_type <> 'large_airport', distance_km) = 1""")
+    # <<< TODO 6.3
+    return
+
+
+@app.cell(hide_code=True)
+def _(check, con, mo):
+    try:
+        _df = con.sql("SELECT airport_iata, airport_name, callsign, movement, altitude_ft, ROUND(distance_km, 1) AS km "
+                      "FROM gold.airport_approaches ORDER BY airport_iata, km").df()
+        _ok = len(_df) == 0 or (_df["km"].max() <= 40 and set(_df["movement"]) <= {"arriving", "departing", "nearby"})
+    except Exception:
+        _df, _ok = None, False
+    mo.vstack([check(_ok and _df is not None, f"{0 if _df is None else len(_df)} aircraft near airports right now",
+                     "gold.airport_approaches should list aircraft within 40 km with movement arriving/departing/"
+                     "nearby."), _df if _df is not None else ""])
+    return
+
+
+@app.cell
+def _(con, mo):
+    import plotly.express as px
+
+    _traffic = con.sql("""
+        SELECT date_trunc('minute', snapshot_time) AS minute, flight_phase, COUNT(DISTINCT icao24) AS aircraft
+        FROM silver.flights GROUP BY ALL ORDER BY minute""").df()
+    mo.vstack([mo.md("## Aircraft per minute and flight phase"),
+               px.area(_traffic, x="minute", y="aircraft", color="flight_phase", height=320)])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Think about it
+
+    - Why a **view** for current_positions and not a table? When would a table be better?
+    - Which airport has the most traffic in your data? Write the query in a new cell.
+    - Some aircraft near Zurich show `nearby` although they are landing. Why? (Look at `vertical_rate` in silver.)
+    - Replace the `ORDER BY` with plain `distance_km` and look at Dübendorf (`LSMD`). What does "large first" get wrong
+      in return? (Hint: the Swiss Air Force flies from Dübendorf.)
+
+    That is the whole medallion pipeline: API -> bronze -> silver -> gold. `flightlab.build_gold(con)` holds the
+    finished views that the app uses.
+
+    **Next:** [07 – Routes and detours](07_routes_detours.py)
+    """)
+    return
+
+
+if __name__ == "__main__":
+    app.run()
