@@ -19,7 +19,8 @@ Switzerland, collected live by your own laptop. Map tiles © Esri, HERE, Garmin,
 
 The project was built for a course at the Lucerne University of Applied Sciences and Arts (HSLU) in October 2026.
 It is also the code behind the blog series
-[Live Flight Data Step by Step](https://www.stefanko.ch/p/live-flight-data-1-opensky-network/).
+[Live Flight Data Step by Step](https://www.stefanko.ch/p/live-flight-data-1-opensky-network/), also on
+[Medium](https://stefanko-ch.medium.com/live-flight-data-step-by-step-part-1-opensky-network-and-the-first-api-call-e3ff56e0dcb1).
 
 ---
 
